@@ -6,21 +6,22 @@ from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.parse import quote, urlencode, urlsplit
+from keywords import KEYWORDS, LOCAL_KEYWORDS, START_DATE, END_DATE
 
+# KEYWORDS = ["job"]
 
-# Edit these values before running the batch.
-KEYWORDS = ["taiwan", "malaysia", "usa"]
-GEOS = ["MY", "SG", "GE", "CN"]
-START_DATE = "2004-01-01"
-END_DATE = "2024-12-31"
+# GEO = ["BD", "ID"]
+
+# LOCAL_KEYWORDS = {"BD": ["চাকরি"], "pekerjaan"}
+
 OUTPUT_ROOT = Path(__file__).resolve().parent / "output"
 HEADLESS = False
 USE_CLASSIC = True
 
 
-def output_path(keyword, geo, start, end):
+def output_path(keyword, geo, start, end, keyword_source):
     slug = re.sub(r"[^\w-]+", "_", keyword).strip("_")[:40] or "keyword"
-    return OUTPUT_ROOT / f"{slug}_{geo}_{start}_{end}_time_series.csv"
+    return OUTPUT_ROOT / f"{slug}_{geo}_{start}_{end}_{keyword_source}.csv"
 
 
 def build_url(keywords, start_date, end_date, geo, classic=False):
@@ -145,9 +146,40 @@ def write_time_series(source, destination, keywords):
                 writer.writerow([timestamp, *(int(score) if score.isdecimal() else score for score in scores)])
                 count += 1
         if not count:
-            raise ValueError("Google Trends returned an empty timeline.")
+            # writer.writerow(["Time", *keywords])
+            # raise ValueError("Google Trends returned an empty timeline.")
+            pass
         return count
 
+def write_row_count_report():
+    OUTPUT_ROOT.mkdir(parents=True, exist_ok=True)
+    report_path = OUTPUT_ROOT / "row_counts.csv"
+
+    with TemporaryDirectory(dir=OUTPUT_ROOT) as folder:
+        temporary_report = Path(folder) / report_path.name
+
+        with temporary_report.open("w", encoding="utf-8", newline="") as output:
+            writer = csv.writer(output)
+            writer.writerow(["file_name", "row_count"])
+
+            for path in sorted(OUTPUT_ROOT.glob("*.csv")):
+                if not path.is_file() or not path.name.endswith(("_EN.csv", "_LOCAL.csv")):
+                    continue
+
+                with path.open(encoding="utf-8-sig", newline="") as source:
+                    rows = csv.reader(source)
+                    header = next(rows, [])
+                    if not header or header[0].strip() != "Time":
+                        print(f"Missing Time header in {path.name}", file=sys.stderr)
+                        writer.writerow([path.stem, ""])
+                        continue
+
+                    count = sum(1 for row in rows if row and row[0].strip())
+                    writer.writerow([path.stem, count])
+
+        temporary_report.replace(report_path)
+
+    print(f"Saved row count report to {report_path}", flush=True)
 
 def main():
     try:
@@ -166,9 +198,10 @@ def main():
         ):
             raise ValueError("GEOS must contain region codes such as MY, MY-10, or WORLD.")
 
+        # English keywords
         for keyword in keywords:
             for geo in geos:
-                destination = output_path(keyword, geo, start, end)
+                destination = output_path(keyword, geo, start, end, "EN")
                 if destination.is_file() and destination.stat().st_size > 0:
                     print(f"Skipping existing CSV: {destination}", flush=True)
                     continue
@@ -183,6 +216,30 @@ def main():
                     count = write_time_series(raw_csv, formatted_csv, [keyword])
                     formatted_csv.replace(destination)
                 print(f"Saved {count} rows to {destination}", flush=True)
+
+        # Local keywords
+        for idx, keyword in enumerate(keywords):
+            for geo in geos:
+                key = LOCAL_KEYWORDS[geo][idx]
+                print(key)
+                destination = output_path(keyword, geo, start, end, "LOCAL")
+                if destination.is_file() and destination.stat().st_size > 0:
+                    print(f"Skipping existing CSV: {destination}", flush=True)
+                    continue
+
+                url = build_url([key], start, end, geo, classic=USE_CLASSIC)
+                print(f"Opening {url}", flush=True)
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                with TemporaryDirectory(dir=destination.parent) as folder:
+                    raw_csv = Path(folder) / "timeline.csv"
+                    formatted_csv = Path(folder) / "formatted.csv"
+                    download_csv(url, raw_csv, HEADLESS)
+                    count = write_time_series(raw_csv, formatted_csv, [key])
+                    formatted_csv.replace(destination)
+                print(f"Saved {count} rows to {destination}", flush=True)
+
+        write_row_count_report()
+    
     except (RuntimeError, OSError, ValueError, csv.Error) as exc:
         print(f"Batch stopped: {exc}", file=sys.stderr)
         return 1
